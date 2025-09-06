@@ -98,32 +98,28 @@ async fn node_upgraded(cmd: &Command, write: &mut WriteConn<'_, '_>) -> Result<(
         block_height: None,
         block_age: None,
         consensus: None,
+        apr: None,
         jobs: Some(NodeJobs(vec![])),
+        jailed: None,
+        jailed_reason: None,
+        sqd_name: None,
     };
     let _updated = update.apply(write).await?;
 
     Ok(())
 }
 
-/// After NodeDelete, set the node status to deleted.
+/// After NodeDelete, permanently delete the node from the database.
 async fn node_deleted(cmd: &Command, write: &mut WriteConn<'_, '_>) -> Result<(), Error> {
     let node = cmd
         .node(write)
         .await?
         .ok_or_else(|| Error::MissingNodeId(cmd.id))?;
-    if node.deleted_at.is_none() {
-        // TODO: This should go on a queue for inconsistencies that we register
-        warn!("Received a deleted confirmation for a node that is not deleted");
-    }
 
-    let update = UpdateNodeState {
-        node_state: Some(NodeState::Deleted),
-        next_state: Some(None),
-        protocol_state: None,
-        protocol_health: None,
-        p2p_address: None,
-    };
-    let _ = update.apply(node.id, write).await?;
+    // Now that the host has confirmed deletion, permanently delete the node from the database
+    Node::delete(node.id, write)
+        .await
+        .map_err(|err| Error::DeleteNode(cmd.id, node.id, err))?;
 
     Ok(())
 }

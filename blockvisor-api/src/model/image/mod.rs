@@ -8,6 +8,9 @@ pub use config::{Config, ConfigId, NewConfig, NodeConfig};
 pub mod property;
 pub use property::{ImageProperty, ImagePropertyId, NewProperty, UiType};
 
+pub mod property_inheritance;
+pub use property_inheritance::{PropertyInheritanceManager, PropertyInheritanceError};
+
 pub mod rule;
 pub use rule::{FirewallRule, ImageRule, ImageRuleId, NewImageRule};
 
@@ -20,6 +23,7 @@ use diesel::result::Error::NotFound;
 use diesel_async::RunQueryDsl;
 use diesel_derive_newtype::DieselNewType;
 use displaydoc::Display as DisplayDoc;
+use semver::Version as SemVersion;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
@@ -182,6 +186,122 @@ impl Image {
             .get_result(conn)
             .await
             .map_err(|err| Error::ByBuild(version_id, org_id, build, err))
+    }
+
+    pub async fn list_for_admin(
+        search: Option<&str>,
+        protocol_filter: Option<&str>,
+        org_filter: Option<OrgId>,
+        offset: u32,
+        limit: u32,
+        authz: &AuthZ,
+        conn: &mut Conn<'_>,
+    ) -> Result<(Vec<(Self, String, String, String, u32)>, u32), Error> {
+        use crate::model::schema::{protocols, protocol_versions, image_properties};
+        use diesel::dsl::count;
+        
+        // Get all images first, then filter to latest per variant in Rust
+        // This approach is simpler than complex SQL with window functions
+
+        // Build the main query that joins with the subquery results
+        let mut results_query = images::table
+            .inner_join(protocol_versions::table.on(images::protocol_version_id.eq(protocol_versions::id)))
+            .inner_join(protocols::table.on(protocol_versions::protocol_id.eq(protocols::id)))
+            .filter(images::visibility.eq_any(<&[Visibility]>::from(authz)))
+            .into_boxed();
+
+        // Apply same filters
+        if let Some(org_id) = org_filter {
+            results_query = results_query.filter(images::org_id.eq(org_id));
+        }
+
+        if let Some(protocol_name) = protocol_filter {
+            results_query = results_query.filter(protocols::name.ilike(format!("%{}%", protocol_name)));
+        }
+
+        if let Some(search_term) = search {
+            results_query = results_query.filter(
+                protocols::name.ilike(format!("%{}%", search_term))
+                    .or(images::description.ilike(format!("%{}%", search_term)))
+            );
+        }
+
+        // Get all images, then filter in Rust to keep only the latest per variant
+        let all_images: Vec<(Image, String, String, String)> = results_query
+            .select((
+                images::all_columns,
+                protocols::name,
+                protocol_versions::variant_key,
+                protocol_versions::semantic_version,
+            ))
+            .order_by((protocols::name.asc(), protocol_versions::variant_key.asc(), images::build_version.desc()))
+            .load(conn)
+            .await
+            .map_err(|err| Error::ByVersions(HashSet::new(), org_filter, err))?;
+
+        // Keep only the latest version for each (protocol_name, variant_key) combination
+        // Select the image with the latest semantic version, then highest build version
+        let mut latest_per_variant = std::collections::HashMap::new();
+        for (image, protocol_name, variant_key, semantic_version) in all_images {
+            let key = (protocol_name.clone(), variant_key.clone());
+            match latest_per_variant.get(&key) {
+                None => {
+                    latest_per_variant.insert(key, (image, protocol_name, variant_key, semantic_version));
+                }
+                Some((_, _, _, existing_semantic_version)) => {
+                    // Compare semantic versions using proper semver parsing
+                    // Since build_version is always 1, we only need to compare semantic versions
+                    let should_update = match (SemVersion::parse(&semantic_version), SemVersion::parse(existing_semantic_version)) {
+                        (Ok(new_version), Ok(existing_version)) => new_version > existing_version,
+                        // If parsing fails, fall back to string comparison as before
+                        _ => semantic_version > *existing_semantic_version,
+                    };
+                    
+                    if should_update {
+                        latest_per_variant.insert(key, (image, protocol_name, variant_key, semantic_version));
+                    }
+                }
+            }
+        }
+
+        // Convert back to Vec and apply pagination
+        let mut filtered_images: Vec<(Image, String, String, String)> = latest_per_variant.into_values().collect();
+        filtered_images.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2))); // Sort by protocol name, then variant key
+        
+        let total_filtered = filtered_images.len();
+        let images_with_protocol: Vec<(Image, String, String, String)> = filtered_images
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .collect();
+
+        // Get property counts for each image
+        let image_ids: Vec<_> = images_with_protocol.iter().map(|(img, _, _, _)| img.id).collect();
+        let property_counts: Vec<(ImageId, i64)> = if !image_ids.is_empty() {
+            image_properties::table
+                .filter(image_properties::image_id.eq_any(&image_ids))
+                .group_by(image_properties::image_id)
+                .select((image_properties::image_id, count(image_properties::id)))
+                .load(conn)
+                .await
+                .map_err(|err| Error::ByVersions(HashSet::new(), org_filter, err))?
+        } else {
+            Vec::new()
+        };
+
+        // Create a map for quick lookup
+        let property_count_map: std::collections::HashMap<ImageId, i64> = property_counts.into_iter().collect();
+
+        // Combine the results
+        let results: Vec<(Image, String, String, String, u32)> = images_with_protocol
+            .into_iter()
+            .map(|(image, protocol_name, variant_key, semantic_version)| {
+                let property_count = property_count_map.get(&image.id).copied().unwrap_or(0) as u32;
+                (image, protocol_name, variant_key, semantic_version, property_count)
+            })
+            .collect();
+
+        Ok((results, total_filtered as u32))
     }
 }
 

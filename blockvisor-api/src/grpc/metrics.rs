@@ -28,6 +28,8 @@ pub enum Error {
     BlockAge(std::num::TryFromIntError),
     /// Failed to parse block height: {0}
     BlockHeight(std::num::TryFromIntError),
+    /// Failed to parse APR: {0}
+    Apr(std::num::ParseFloatError),
     /// Claims check failed: {0}
     Claims(#[from] crate::auth::claims::Error),
     /// Diesel failure: {0}
@@ -78,6 +80,10 @@ pub enum Error {
     UsedDisk(std::num::TryFromIntError),
     /// Failed to parse used memory: {0}
     UsedMemory(std::num::TryFromIntError),
+    /// Failed to parse jailed reason: {0}
+    JailedReason(String),
+    /// Failed to parse sqd name: {0}
+    SqdName(String),
 }
 
 impl From<Error> for Status {
@@ -110,6 +116,9 @@ impl From<Error> for Status {
             NodeGrpc(err) => err.into(),
             NodeStatus(err) => err.into(),
             Resource(err) => err.into(),
+            Apr(_) => Status::invalid_argument("apr"),
+            JailedReason(_) => Status::invalid_argument("jailed_reason"),
+            SqdName(_) => Status::invalid_argument("sqd_name"),
         }
     }
 }
@@ -283,12 +292,18 @@ impl api::NodeMetrics {
             .map(i64::try_from)
             .transpose()
             .map_err(Error::BlockAge)?;
+        let apr = self
+            .apr
+            .map_or(Ok::<Option<f64>, Error>(None), |apr| Ok(Some(apr)))?;
         let jobs: NodeJobs = self
             .jobs
             .into_iter()
             .map(Into::into)
             .collect::<Vec<_>>()
             .into();
+        let jailed = self.jailed;
+        let jailed_reason = self.jailed_reason;
+        let sqd_name = self.sqd_name;
 
         Ok(UpdateNodeMetrics {
             id,
@@ -298,7 +313,11 @@ impl api::NodeMetrics {
             block_height,
             block_age,
             consensus: self.consensus,
+            apr,
             jobs: Some(jobs),
+            jailed,
+            jailed_reason,
+            sqd_name,
         })
     }
 }

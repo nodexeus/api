@@ -40,6 +40,8 @@ pub enum Error {
     BlockAge(std::num::TryFromIntError),
     /// Failed to parse block height: {0}
     BlockHeight(std::num::TryFromIntError),
+    /// Failed to parse APR: {0}
+    Apr(std::num::ParseFloatError),
     /// Claims check failed: {0}
     Claims(#[from] crate::auth::claims::Error),
     /// Node command error: {0}
@@ -132,6 +134,10 @@ pub enum Error {
     UnknownSortField,
     /// Node user error: {0}
     User(#[from] crate::model::user::Error),
+    /// Failed to parse jailed reason: {0}
+    JailedReason(String),
+    /// Failed to parse sqd name: {0}
+    SqdName(String),
 }
 
 impl From<Error> for Status {
@@ -187,6 +193,9 @@ impl From<Error> for Status {
             Rule(err) => err.into(),
             Sql(err) => err.into(),
             User(err) => err.into(),
+            Apr(_) => Status::invalid_argument("apr"),
+            JailedReason(_) => Status::invalid_argument("jailed_reason"),
+            SqdName(_) => Status::invalid_argument("sqd_name"),
         }
     }
 }
@@ -760,7 +769,7 @@ pub async fn delete(
         .auth_or_for(&meta, NodeAdminPerm::Delete, NodePerm::Delete, node_id)
         .await?;
 
-    let node = Node::delete(node_id, &mut write).await?;
+    let node = Node::by_id(node_id, &mut write).await?;
     let delete_cmd = NewCommand::node(&node, CommandType::NodeDelete)?
         .create(&mut write)
         .await?;
@@ -768,10 +777,6 @@ pub async fn delete(
         .await?
         .ok_or(Error::NoNodeDelete)?;
     write.mqtt(delete_cmd);
-
-    let deleted_by = common::Resource::from(&authz);
-    let deleted = api::NodeMessage::deleted(&node, Some(deleted_by));
-    write.mqtt(deleted);
 
     Ok(api::NodeServiceDeleteResponse {})
 }
@@ -896,11 +901,18 @@ impl api::Node {
             .block_height
             .map(|age| u64::try_from(age).map_err(Error::BlockAge))
             .transpose()?;
+        let apr = node
+            .apr
+            .map_or(Ok::<Option<f64>, Error>(None), |apr| Ok(Some(apr)))?;
 
         let jobs = node
             .jobs
             .map(|jobs| jobs.into_iter().map(Into::into).collect())
             .unwrap_or_default();
+        let jailed = node.jailed;
+        let jailed_reason = node.jailed_reason;
+        let sqd_name = node.sqd_name;
+
         let reports = reports
             .into_iter()
             .map(|report| {
@@ -950,12 +962,16 @@ impl api::Node {
             note: node.note,
             node_status: Some(status.into()),
             jobs,
+            apr,
             reports,
             tags: Some(node.tags.into()),
             created_by: Some(common::Resource::from(created_by)),
             created_at: Some(NanosUtc::from(node.created_at).into()),
             updated_at: node.updated_at.map(NanosUtc::from).map(Into::into),
             cost,
+            jailed,
+            jailed_reason,
+            sqd_name,
             version_metadata: version
                 .metadata
                 .as_ref()
@@ -1034,8 +1050,11 @@ impl api::NodeServiceListRequest {
                     api::NodeSortField::ProtocolState => Ok(NodeSort::ProtocolState(order)),
                     api::NodeSortField::ProtocolHealth => Ok(NodeSort::ProtocolHealth(order)),
                     api::NodeSortField::BlockHeight => Ok(NodeSort::BlockHeight(order)),
+                    api::NodeSortField::Apr => Ok(NodeSort::Apr(order)),
                     api::NodeSortField::CreatedAt => Ok(NodeSort::CreatedAt(order)),
                     api::NodeSortField::UpdatedAt => Ok(NodeSort::UpdatedAt(order)),
+                    api::NodeSortField::Jailed => Ok(NodeSort::Jailed(order)),
+                    api::NodeSortField::SqdName => Ok(NodeSort::SqdName(order)),
                 }
             })
             .collect::<Result<_, _>>()?;

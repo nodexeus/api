@@ -24,7 +24,11 @@ async fn responds_ok_for_write_node() {
         }),
         height: Some(10),
         block_age: Some(5),
+        apr: Some(10.0),
+        sqd_name: Some("sqd-name".to_string()),
         consensus: Some(false),
+        jailed: Some(false),
+        jailed_reason: None,
         jobs: vec![common::NodeJob {
             name: "download".to_string(),
             status: 2,
@@ -50,6 +54,8 @@ async fn responds_ok_for_write_node() {
     let node = Node::by_id(node_id, &mut conn).await.unwrap();
     assert_eq!(node.block_height, Some(10));
     assert_eq!(node.block_age, Some(5));
+    assert_eq!(node.apr, Some(10.0));
+    assert_eq!(node.sqd_name, None);
     assert_eq!(node.consensus, Some(false));
     assert_eq!(node.node_state, NodeState::Running);
     // next state writes from client are ignored
@@ -125,7 +131,11 @@ async fn single_failure_doesnt_abort_all_updates() {
         node_id: node_id.to_string(),
         height: Some(10),
         block_age: Some(5),
+        apr: Some(10.0),
+        sqd_name: Some("sqd-name".to_string()),
         consensus: Some(false),
+        jailed: Some(false),
+        jailed_reason: None,
         node_status: None,
         jobs: vec![common::NodeJob {
             name: "download".to_string(),
@@ -156,6 +166,8 @@ async fn single_failure_doesnt_abort_all_updates() {
     let node = Node::by_id(node_id, &mut conn).await.unwrap();
     assert_eq!(node.block_height, Some(10));
     assert_eq!(node.block_age, Some(5));
+    assert_eq!(node.apr, Some(10.0));
+    assert_eq!(node.sqd_name, None);
     assert_eq!(node.consensus, Some(false));
     assert_eq!(node.node_state, NodeState::Running);
 

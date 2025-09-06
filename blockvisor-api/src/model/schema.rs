@@ -360,6 +360,7 @@ diesel::table! {
         add_disk_bytes -> Nullable<Int8>,
         display_name -> Nullable<Text>,
         display_group -> Nullable<Text>,
+        variants -> Nullable<Jsonb>,
     }
 }
 
@@ -542,6 +543,12 @@ diesel::table! {
         updated_at -> Nullable<Timestamptz>,
         deleted_at -> Nullable<Timestamptz>,
         cost -> Nullable<Jsonb>,
+        apr -> Nullable<Float8>,
+        jailed -> Nullable<Bool>,
+        #[max_length = 255]
+        jailed_reason -> Nullable<Varchar>,
+        #[max_length = 255]
+        sqd_name -> Nullable<Varchar>,
     }
 }
 
